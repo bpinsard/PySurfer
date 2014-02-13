@@ -315,8 +315,8 @@ class Brain(object):
     brains : list
         List of the underlying brain instances.
     """
-    def __init__(self, subject_id, hemi, surf, curv=True, title=None,
-                 config_opts={}, figure=None, subjects_dir=None,
+    def __init__(self, subject_id, hemi, surf, rois_parc=None, curv=True,
+                 title=None, config_opts={}, figure=None, subjects_dir=None,
                  views=['lat'], show_toolbar=False, offscreen=False):
         col_dict = dict(lh=1, rh=1, both=1, split=2)
         n_col = col_dict[hemi]
@@ -354,6 +354,9 @@ class Brain(object):
             if curv:
                 geo.load_curvature()
             self.geo[h] = geo
+        if not rois_parc is None:
+             geo = ROIs(subject_id, h, rois_parc, subjects_dir)
+             self.geo['rois'] = geo
 
         # deal with making figures
         self._set_window_properties(config_opts)
@@ -393,6 +396,20 @@ class Brain(object):
                     brains += [dict(row=ri, col=ci, brain=brain, hemi=h)]
                     brain_row += [brain]
             brain_matrix += [brain_row]
+        if not rois_parc is None:
+            figures, _v = _make_viewer(figure, 1, 1, title,
+                                       self._scene_size, offscreen)
+            self._roi_figures = figures
+            self._roi_v = _v
+            self._rois = _ROIs(
+                title=None,
+                parc_file = rois_parc,
+                config_opts = config_opts,
+                subjects_dir = subjects_dir,
+                geo = self.geo['rois'],
+                figure = figures[ri][ci],
+                backend = self._window_backend)
+            
         self._toggle_render(True)
         self._original_views = views
         self._brain_list = brains
@@ -891,6 +908,7 @@ class Brain(object):
                 if array.ndim == 2 and time_label is not None:
                     self.add_text(0.05, y_txt, time_label % time[0],
                                   name="time_label", row=row, col=col)
+        
         self._toggle_render(True, views)
         data['surfaces'] = surfs
         data['colorbars'] = bars
@@ -2397,6 +2415,91 @@ class _Hemisphere(object):
             text_color = (0., 0., 0.)
         cbar.label_text_property.color = text_color
 
+
+class _ROIs(object):
+    def __init__(self, subject_id, parc_file, figure, geo, title,
+                 config_opts, subjects_dir, bg_color, offset, backend):
+        self.subject_id = subject_id
+        self.parc_file = parc_file
+        self.subjects_dir = subjects_dir
+        self._f = figure
+        self._geo = geo
+        self._bg_color = bg_color
+        self._backend = backend
+
+#        self._f.scene.disable_render = True
+
+        """
+        self._volume = mlab.pipeline.volume(self._scalar_field,
+                                            vmin=-3,vmax=3,
+                                            #mask_points = 2,
+                                            figure=self._f)
+        self._volume.volume_property.shade=False
+        self._volume.volume_property.interpolation_type = 'nearest'
+        lut_manager = self._volume.module_manager.scalar_lut_manager
+        lut_manager.use_default_range = False
+        lut_manager.lut.nan_color = (0,0,0,0)
+        """
+#        self._f.scene.disable_render = False
+
+    @verbose
+    def add_data(self, rois_data, mlab_plot, min, max,
+                 thresh, lut, colormap, alpha, time, time_label, colorbar):
+        """Add data to the brain"""
+#       self._slicing_planes[0].module_manager.scalar_lut_manager.lut = lut
+#        self._slicing_planes[0].module_manager.scalar_lut_manager.lut.nan_color=(0,0,0,0)
+        self._rois_data = rois_data
+        self.set_data_time_index(0)
+        self._f.scene.disable_render = True
+
+        self._slicing_planes = [ mlab.pipeline.image_plane_widget(
+            self._scalar_field,
+            figure=self._f, reset_zoom=True,
+            plane_orientation='%s_axes'%ax) for ax in 'xyz']
+        lut_manager = self._slicing_planes[0].module_manager.scalar_lut_manager
+        lut_manager.lut.nan_color = (0,0,0,0)
+        lut_manager.use_default_range = False
+        for sp in self._slicing_planes:
+            sp.widgets[0].texture_interpolate = False
+            sp.widgets[0].reslice_interpolate = 'nearest_neighbour'
+
+        self._surfaces = []
+        for l in self._rois_data.keys():
+            src = mlab.pipeline.scalar_field(
+                (self._geo.parc_data[self._bbox] == l).astype(np.uint8))
+            surf = mlab.pipeline.iso_surface(src, contours = [1], opacity=0.3)
+            surf.actor.property.color = self._geo._lut[l][1]
+            surf.actor.mapper.scalar_visibility=False
+            self._surfaces.append(surf)
+
+        self._f.scene.disable_render = False
+
+            
+
+    def set_data_time_index(self,t):
+        self._f.scene.disable_render = True
+        self._data = np.empty(self._geo.parc_data.shape)
+        self._data.fill(np.nan)
+        for i, d in self._rois_data.items():
+            plot_mask = self._geo.parc_data == i
+            if np.count_nonzero(plot_mask) != d.shape[0]:
+                raise ValueError(
+                    'data should have the same number of voxels as roi')
+            if d.ndim > 1:
+                plot_data = d[:,t]
+            else:
+                plot_data = d
+            self._data[plot_mask] = plot_data
+        if not hasattr(self,'_scalar_field'):
+            aw = np.argwhere(np.logical_not(np.isnan(self._data)))
+            self._bbox = [slice(l,t) for l,t in zip(aw.min(0),aw.max(0))]
+            print self._bbox
+            self._scalar_field = mlab.pipeline.scalar_field(
+                self._data[self._bbox], figure=self._f)
+        else:
+            self._scalar_field.mlab_source.scalars = self._data[self._bbox]
+        self._f.scene.disable_render = False
+            
 
 class OverlayData(object):
     """Encapsulation of statistical neuroimaging overlay viz data"""

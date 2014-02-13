@@ -132,6 +132,59 @@ class Surface(object):
         self.coords = np.dot(np.c_[self.coords, np.ones(len(self.coords))],
                                      mtx.T)[:, :3]
 
+class ROIs(object):
+    
+    """Container for surface object
+
+    Attributes
+    ----------
+    subject_id : string
+        Name of subject
+    parc : string
+        Name of the parcellation to load (eg. aparc... .mgz)
+    data_path : string
+        Path where to look for data
+    subjects_dir : str | None
+        If not None, this directory will be used as the subjects directory
+        instead of the value set using the SUBJECTS_DIR environment variable.
+    """
+
+    def __init__(self, subject_id, parc, subjects_dir=None):
+        """ROIs
+
+        Parameters
+        ----------
+        subject_id : string
+            Name of subject
+        parc : string
+            Name of the surface to load (eg. inflated, orig ...)
+        subjects_dir : str | None
+            If not None, this directory will be used as the subjects directory
+            instead of the value set using the SUBJECTS_DIR environment variable.
+        """
+        self.subject_id = subject_id
+        self.parc = parc
+
+        subjects_dir = _get_subjects_dir(subjects_dir)
+        self.data_path = op.join(subjects_dir, subject_id)
+        lut_file = open(os.path.join(os.environ['FREESURFER_HOME'],
+                                     'FreeSurferColorLUT.txt'))
+        self._lut = dict()
+        for l in lut_file.readlines():
+            if len(l)>4 and l[0]!='#':
+                l=l.split()
+                self._lut[int(l[0])] = (l[1],
+                                        tuple(float(c)/255. for c in l[2:5]))
+        lut_file.close()
+
+    def load_geometry(self):
+        parc_path = self.parc
+        if os.path.exists(parc_path):
+            parc_path = op.join(self.data_path, "mri", self.parc)
+        
+        self.parc_file = nib.load(parc_path)
+        self.parc_data = self.parc_file.get_data()
+        # could include bbox calculation here to improve performances
 
 def _fast_cross_3d(x, y):
     """Compute cross product between list of 3D vectors
