@@ -2427,6 +2427,10 @@ class _ROIs(object):
         self._bg_color = bg_color
         self._backend = backend
 
+
+        self.parc_file = nib.load(parc_file)
+        self.parc_data = self.parc_file.get_data()
+
 #        self._f.scene.disable_render = True
 
         """
@@ -2464,13 +2468,20 @@ class _ROIs(object):
             sp.widgets[0].reslice_interpolate = 'nearest_neighbour'
 
         self._surfaces = []
-        for l in self._rois_data.keys():
+        for roi_label in self._rois_data.keys():
+            mask = (self._geo.parc_data == roi_label)
+            aw = np.argwhere(mask)
+            bbox = [slice(l,t) for l,t in zip(aw.min(0),aw.max(0))]
+            del aw
             src = mlab.pipeline.scalar_field(
-                (self._geo.parc_data[self._bbox] == l).astype(np.uint8))
+                mask[bbox].astype(np.uint8))
             surf = mlab.pipeline.iso_surface(src, contours = [1], opacity=0.3)
-            surf.actor.property.color = self._geo._lut[l][1]
-            surf.actor.mapper.scalar_visibility=False
+            surf.actor.property.color = self._geo._lut[roi_label][1]
+            surf.actor.mapper.scalar_visibility = False
+            surf.actor.actor.position = [sl.start*sp for sl,sp in zip(bbox,self._geo.spacing)]
+            surf.actor.actor.scale = self._geo.spacing
             self._surfaces.append(surf)
+            del mask
 
         self._f.scene.disable_render = False
 
@@ -2478,10 +2489,10 @@ class _ROIs(object):
 
     def set_data_time_index(self,t):
         self._f.scene.disable_render = True
-        self._data = np.empty(self._geo.parc_data.shape)
+        self._data = np.empty(self.parc_file.shape)
         self._data.fill(np.nan)
         for i, d in self._rois_data.items():
-            plot_mask = self._geo.parc_data == i
+            plot_mask = self.parc_data == i
             if np.count_nonzero(plot_mask) != d.shape[0]:
                 raise ValueError(
                     'data should have the same number of voxels as roi')
@@ -2494,8 +2505,13 @@ class _ROIs(object):
             aw = np.argwhere(np.logical_not(np.isnan(self._data)))
             self._bbox = [slice(l,t) for l,t in zip(aw.min(0),aw.max(0))]
             print self._bbox
+            spacing = self.parc_file.get_header().get_zooms()
             self._scalar_field = mlab.pipeline.scalar_field(
-                self._data[self._bbox], figure=self._f)
+                self._data[self._bbox],
+                figure=self._f)
+            self._scalar_field.origin = [sl.start*sp for sl,sp in zip(self._bbox,spacing)]
+            self._scalar_field.spacing = spacing
+
         else:
             self._scalar_field.mlab_source.scalars = self._data[self._bbox]
         self._f.scene.disable_render = False

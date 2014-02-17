@@ -183,6 +183,7 @@ class ROIs(object):
             parc_path = op.join(self.data_path, "mri", self.parc)
         
         self.parc_file = nib.load(parc_path)
+        self.spacing = self.parc_file.get_header().get_zooms()
         self.parc_data = self.parc_file.get_data()
         # could include bbox calculation here to improve performances
 
