@@ -2416,9 +2416,15 @@ class _Hemisphere(object):
         cbar.label_text_property.color = text_color
 
 
-class _ROIs(object):
+from traits.api import HasTraits, Instance, Array, Int, Bool, Dict, \
+    on_trait_change, Range, Property, Button
+from traitsui.api import View, Item, HGroup, Group
+
+class _ROIs(HasTraits):
     def __init__(self, subject_id, parc_file, figure, geo, title,
                  config_opts, subjects_dir, bg_color, offset, backend):
+        traits = dict()
+        super(_ROIs, self).__init__(**traits)
         self.subject_id = subject_id
         self.parc_file = parc_file
         self.subjects_dir = subjects_dir
@@ -2430,10 +2436,119 @@ class _ROIs(object):
 
         self.parc_file = nib.load(parc_file)
         self.parc_data = self.parc_file.get_data()
+    """
+    data = Array
+    data_src = Instance(Source)
+
+    scene3d = Instance(MlabSceneModel, ())
+    scene_x = Instance(MlabSceneModel, ())
+    scene_y = Instance(MlabSceneModel, ())
+    scene_z = Instance(MlabSceneModel, ())
+
+    # The image plane widgets of the 3D scene
+    ipw_3d_x = Instance(PipelineBase)
+    ipw_3d_y = Instance(PipelineBase)
+    ipw_3d_z = Instance(PipelineBase)
+
+    def _data_src_default(self):
+        return mlab.pipeline.scalar_field(self.data,
+                            figure=self.scene3d.mayavi_scene,
+                            name='Data',)
+    
+    def make_ipw_3d(self, axis_name):
+        ipw = mlab.pipeline.image_plane_widget(self.data_src,
+                        figure=self.scene3d.mayavi_scene,
+                        plane_orientation='%s_axes' % axis_name,
+                        name='Cut %s' % axis_name)
+        ipw.widgets[0].texture_interpolate = False
+        ipw.widgets[0].reslice_interpolate = 'nearest_neighbour'
+        return ipw
+
+    def _ipw_3d_x_default(self):
+        return self.make_ipw_3d('x')
+
+    def _ipw_3d_y_default(self):
+        return self.make_ipw_3d('y')
+
+    def _ipw_3d_z_default(self):
+        return self.make_ipw_3d('z')
+
+    def make_side_view(self, axis_name):
+        scene = getattr(self, 'scene_%s' % axis_name)
+        scene.scene.parallel_projection = True
+        ipw_3d = getattr(self, 'ipw_3d_%s' % axis_name)
+
+        # We create the image_plane_widgets in the side view using a
+        # VTK dataset pointing to the data on the corresponding
+        # image_plane_widget in the 3D view (it is returned by
+        # ipw_3d._get_reslice_output())
+        side_src = ipw_3d.ipw._get_reslice_output()
+        ipw = mlab.pipeline.image_plane_widget(
+                            side_src,
+                            plane_orientation='z_axes',
+                            vmin=self.data.min(),
+                            vmax=self.data.max(),
+                            figure=scene.mayavi_scene,
+                            name='Cut view %s' % axis_name,
+                            )
+        setattr(self, 'ipw_%s' % axis_name, ipw)
+
+        # Extract the spacing of the side_src to convert coordinates
+        # into indices
+        spacing = side_src.spacing
+
+        # Make left-clicking create a crosshair
+        ipw.ipw.left_button_action = 0
+
+        x, y, z = self.position
+        cursor = mlab.points3d(x, y, z,
+                            mode='axes',
+                            color=(0, 0, 0),
+                            scale_factor=2*max(self.data.shape),
+                            figure=scene.mayavi_scene,
+                            name='Cursor view %s' % axis_name,
+                        )
+        self.cursors[axis_name] = cursor
+
+        # Add a callback on the image plane widget interaction to
+        # move the others
+        this_axis_number = self._axis_names[axis_name]
+        def move_view(obj, evt):
+            # Disable rendering on all scene
+            position = list(obj.GetCurrentCursorPosition()*spacing)[:2]
+            position.insert(this_axis_number, self.position[this_axis_number])
+            # We need to special case y, as the view has been rotated.
+            if axis_name is 'y':
+                position = position[::-1]
+            self.position = position
+
+        ipw.ipw.add_observer('InteractionEvent', move_view)
+        ipw.ipw.add_observer('StartInteractionEvent', move_view)
+
+        # Center the image plane widget
+        ipw.ipw.slice_position = 0.5*self.data.shape[
+                                        self._axis_names[axis_name]]
+
+        # 2D interaction: only pan and zoom
+        scene.scene.interactor.interactor_style = \
+                                 tvtk.InteractorStyleImage()
+        scene.scene.background = (0, 0, 0)
+
+        # Some text:
+        mlab.text(0.01, 0.8, axis_name, width=0.08)
+
+        # Choose a view that makes sens
+        views = dict(x=(0, 0), y=(90, 180), z=(0, 0))
+        mlab.view(views[axis_name][0],
+                  views[axis_name][1],
+                  focalpoint=0.5*np.array(self.data.shape),
+                  figure=scene.mayavi_scene)
+        scene.scene.camera.parallel_scale = 0.52*np.mean(self.data.shape)
+        """
 
 #        self._f.scene.disable_render = True
-
-        """
+        
+    """
         self._volume = mlab.pipeline.volume(self._scalar_field,
                                             vmin=-3,vmax=3,
                                             #mask_points = 2,
@@ -2445,7 +2560,7 @@ class _ROIs(object):
         lut_manager.lut.nan_color = (0,0,0,0)
         """
 #        self._f.scene.disable_render = False
-
+        
     @verbose
     def add_data(self, rois_data, mlab_plot, min, max,
                  thresh, lut, colormap, alpha, time, time_label, colorbar):
@@ -2456,35 +2571,37 @@ class _ROIs(object):
         self.set_data_time_index(0)
         self._f.scene.disable_render = True
 
-        self._slicing_planes = [ mlab.pipeline.image_plane_widget(
-            self._scalar_field,
-            figure=self._f, reset_zoom=True,
-            plane_orientation='%s_axes'%ax) for ax in 'xyz']
-        lut_manager = self._slicing_planes[0].module_manager.scalar_lut_manager
-        lut_manager.lut.nan_color = (0,0,0,0)
-        lut_manager.use_default_range = False
-        for sp in self._slicing_planes:
-            sp.widgets[0].texture_interpolate = False
-            sp.widgets[0].reslice_interpolate = 'nearest_neighbour'
-
-        self._surfaces = []
-        for roi_label in self._rois_data.keys():
-            mask = (self._geo.parc_data == roi_label)
-            aw = np.argwhere(mask)
-            bbox = [slice(l,t) for l,t in zip(aw.min(0),aw.max(0))]
-            del aw
-            src = mlab.pipeline.scalar_field(
-                mask[bbox].astype(np.uint8))
-            surf = mlab.pipeline.iso_surface(src, contours = [1], opacity=0.3)
-            surf.actor.property.color = self._geo._lut[roi_label][1]
-            surf.actor.mapper.scalar_visibility = False
-            surf.actor.actor.position = [sl.start*sp for sl,sp in zip(bbox,self._geo.spacing)]
-            surf.actor.actor.scale = self._geo.spacing
-            self._surfaces.append(surf)
-            del mask
+        if not hasattr(self,'_slicing_planes'):
+            self._slicing_planes = [ mlab.pipeline.image_plane_widget(
+                    self._scalar_field,
+                    figure=self._f, reset_zoom=True,
+                    plane_orientation='%s_axes'%ax) for ax in 'xyz']
+            lut_manager = self._slicing_planes[0].module_manager.scalar_lut_manager
+            lut_manager.lut.nan_color = (0,0,0,0)
+            lut_manager.use_default_range = False
+            
+            for sp in self._slicing_planes:
+                sp.widgets[0].texture_interpolate = False
+                sp.widgets[0].reslice_interpolate = 'nearest_neighbour'
+    
+        if not hasattr(self,'_surfaces'):
+            self._surfaces = []
+            for roi_label in self._rois_data.keys():
+                mask = (self._geo.parc_data == roi_label)
+                aw = np.argwhere(mask)
+                bbox = [slice(l,t) for l,t in zip(aw.min(0),aw.max(0))]
+                del aw
+                src = mlab.pipeline.scalar_field(
+                    mask[bbox].astype(np.uint8))
+                surf = mlab.pipeline.iso_surface(src, contours = [1], opacity=0.3)
+                surf.actor.property.color = self._geo._lut[roi_label][1]
+                surf.actor.mapper.scalar_visibility = False
+                surf.actor.actor.position = [sl.start*sp for sl,sp in zip(bbox,self._geo.spacing)]
+                surf.actor.actor.scale = self._geo.spacing
+                self._surfaces.append(surf)
+                del mask
 
         self._f.scene.disable_render = False
-
             
 
     def set_data_time_index(self,t):
@@ -2509,14 +2626,39 @@ class _ROIs(object):
             self._scalar_field = mlab.pipeline.scalar_field(
                 self._data[self._bbox],
                 figure=self._f)
-            self._scalar_field.origin = [sl.start*sp for sl,sp in zip(self._bbox,spacing)]
+            origin = [sl.start*sp for sl,sp in zip(self._bbox,spacing)]
+            self._scalar_field.origin = origin
             self._scalar_field.spacing = spacing
 
         else:
             self._scalar_field.mlab_source.scalars = self._data[self._bbox]
         self._f.scene.disable_render = False
-            
 
+        """
+        view = View(HGroup(
+                Group(
+                    Item('scene_y',
+                         editor=SceneEditor(scene_class=Scene),
+                         height=250, width=300),
+                    Item('scene_z',
+                         editor=SceneEditor(scene_class=Scene),
+                         height=250, width=300),
+                    show_labels=False,
+                    ),
+                Group(
+                    Item('scene_x',
+                         editor=SceneEditor(scene_class=Scene),
+                         height=250, width=300),
+                    Item('scene3d',
+                         editor=SceneEditor(scene_class=Scene),
+                         height=250, width=300),
+                    show_labels=False,
+                  ),
+                ),
+                    resizable=True,
+                    title='Volume Slicer',
+                    )
+                    """
 class OverlayData(object):
     """Encapsulation of statistical neuroimaging overlay viz data"""
 
