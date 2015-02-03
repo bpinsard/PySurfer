@@ -75,7 +75,7 @@ class RoisSlicer(HasTraits):
         self.disable_render = True
 
         self._rois_mask = rois_mask
-        self._rois_data = rois_mask.get_data()
+        self._rois_data = rois_mask.get_data().astype(np.int)
         self._rois_mask_highres = rois_mask_highres
         if self._rois_mask_highres is None:
             self._rois_mask_highres = self._rois_mask
@@ -86,9 +86,11 @@ class RoisSlicer(HasTraits):
         self._rois_mask_data = np.zeros_like(self._rois_data, dtype=np.float)
         for l in self._rois_labels:
             self._rois_mask_data[self._rois_data==l] = l
-
+            
         aw = np.argwhere(self._rois_mask_data>0)
         awmin,awmax = aw.min(0)-1,aw.max(0)+1
+        awmin[awmin<0] = 0
+        awmax = np.min((awmax,self._rois_mask_data.shape),axis=0)
         print awmin, awmax
         self._bbox = [slice(l,t) for l,t in zip(awmin,awmax)]
         del aw
