@@ -1,9 +1,11 @@
 import os
 from os.path import join as pjoin
+from tempfile import mkdtemp
 from warnings import warn
 
 import numpy as np
 from scipy import stats, ndimage, misc
+from scipy.interpolate import interp1d
 from matplotlib.colors import colorConverter
 
 import nibabel as nib
@@ -15,11 +17,11 @@ from mayavi.core.ui.mayavi_scene import MayaviScene
 
 from . import utils, io
 from .config import config
-from .utils import Surface, verbose, create_color_lut, _get_subjects_dir
+from .utils import (Surface, verbose, create_color_lut, _get_subjects_dir,
+                    string_types, assert_ffmpeg_is_available, ffmpeg)
 
 
 import logging
-logging.basicConfig()  # suppress "No handlers found for logger" error
 logger = logging.getLogger('surfer')
 
 from traits.api import (HasTraits, Range, Int, Float,
@@ -74,8 +76,8 @@ def make_montage(filename, fnames, orientation='h', colorbar=None,
     # This line is only necessary to overcome a PIL bug, see:
     #     http://stackoverflow.com/questions/10854903/what-is-causing-
     #          dimension-dependent-attributeerror-in-pil-fromarray-function
-    fnames = [f if isinstance(f, basestring) else f.copy() for f in fnames]
-    if isinstance(fnames[0], basestring):
+    fnames = [f if isinstance(f, string_types) else f.copy() for f in fnames]
+    if isinstance(fnames[0], string_types):
         images = map(Image.open, fnames)
     else:
         images = map(Image.fromarray, fnames)
@@ -85,6 +87,8 @@ def make_montage(filename, fnames, orientation='h', colorbar=None,
         # sum the RGB dimension so we do not miss G or B-only pieces
         gray = np.sum(np.array(im), axis=-1)
         gray[gray == gray[0, 0]] = 0  # hack for find_objects that wants 0
+        if np.all(gray == 0):
+            raise ValueError("Empty image (all pixels have the same color).")
         labels, n_labels = ndimage.label(gray.astype(np.float))
         slices = ndimage.find_objects(labels, n_labels)  # slice roi
         if colorbar is not None and ix in colorbar:
@@ -198,7 +202,7 @@ def _make_viewer(figure, n_row, n_col, title, scene_size, offscreen):
             orig_val = mlab.options.offscreen
             mlab.options.offscreen = True
             figures = [[mlab.figure(size=(h / n_row, w / n_col))
-                        for _ in xrange(n_col)] for __ in xrange(n_row)]
+                        for _ in range(n_col)] for __ in range(n_row)]
             mlab.options.offscreen = orig_val
             _v = None
         else:
@@ -236,7 +240,7 @@ class _MlabGenerator(HasTraits):
         self.n_col = n_col
         self.width = width
         self.height = height
-        for fi in xrange(n_row * n_col):
+        for fi in range(n_row * n_col):
             name = 'mlab_view%03g' % fi
             self.mlab_names.append(name)
             self.add_trait(name, Instance(MlabSceneModel, ()))
@@ -260,9 +264,9 @@ class _MlabGenerator(HasTraits):
         from traitsui.api import (View, Item, VGroup, HGroup)
         ind = 0
         va = []
-        for ri in xrange(self.n_row):
+        for ri in range(self.n_row):
             ha = []
-            for ci in xrange(self.n_col):
+            for ci in range(self.n_col):
                 ha += [Item(name=self.mlab_names[ind], style='custom',
                             resizable=True, show_label=False,
                             editor=SceneEditor(scene_class=MayaviScene))]
@@ -320,7 +324,7 @@ class Brain(object):
                  views=['lat'], show_toolbar=False, offscreen=False):
         col_dict = dict(lh=1, rh=1, both=1, split=2)
         n_col = col_dict[hemi]
-        if not hemi in col_dict.keys():
+        if hemi not in col_dict.keys():
             raise ValueError('hemi must be one of [%s], not %s'
                              % (', '.join(col_dict.keys()), hemi))
         # Get the subjects directory from parameter or env. var
@@ -605,7 +609,7 @@ class Brain(object):
     def _geo(self):
         """Wrap to _geo"""
         self._get_one_brain([[]], '_geo')
-        if self.geo['lh'] is not None:
+        if ('lh' in self.geo) and ['lh'] is not None:
             return self.geo['lh']
         else:
             return self.geo['rh']
@@ -672,7 +676,7 @@ class Brain(object):
             as a source
         """
         # If source is a string, try to load a file
-        if isinstance(source, basestring):
+        if isinstance(source, string_types):
             if name is None:
                 basename = os.path.basename(source)
                 if basename.endswith(".gz"):
@@ -768,7 +772,7 @@ class Brain(object):
         # load data here
         scalar_data, name = self._read_scalar_data(source, hemi, name=name)
         min, max = self._get_display_range(scalar_data, min, max, sign)
-        if not sign in ["abs", "pos", "neg"]:
+        if sign not in ["abs", "pos", "neg"]:
             raise ValueError("Overlay sign must be 'abs', 'pos', or 'neg'")
         old = OverlayData(scalar_data, self.geo[hemi], min, max, sign)
         ol = []
@@ -785,7 +789,7 @@ class Brain(object):
                  colormap="RdBu_r", alpha=1,
                  vertices=None, smoothing_steps=20, time=None,
                  time_label="time index=%d", colorbar=True,
-                 hemi=None):
+                 hemi=None, remove_existing=False):
         """Display data from a numpy array on the surface.
 
         This provides a similar interface to add_overlay, but it displays
@@ -834,6 +838,9 @@ class Brain(object):
             If None, it is assumed to belong to the hemipshere being
             shown. If two hemispheres are being shown, an error will
             be thrown.
+        remove_existing : bool
+            Remove surface added by previous "add_data" call. Useful for
+            conserving memory when displaying different data in a loop.
         """
         hemi = self._check_hemi(hemi)
 
@@ -913,6 +920,11 @@ class Brain(object):
         data['surfaces'] = surfs
         data['colorbars'] = bars
         data['orig_ctable'] = ct
+
+        if remove_existing and self.data_dict[hemi] is not None:
+            for surf in self.data_dict[hemi]['surfaces']:
+                surf.parent.parent.remove()
+
         self.data_dict[hemi] = data
 
     def add_annotation(self, annot, borders=True, alpha=1, hemi=None,
@@ -923,8 +935,10 @@ class Brain(object):
         ----------
         annot : str
             Either path to annotation file or annotation name
-        borders : bool
-            Show only borders of regions
+        borders : bool | int
+            Show only label borders. If int, specify the number of steps
+            (away from the true border) along the cortical mesh to include
+            as part of the border definition.
         alpha : float in [0, 1]
             Alpha level to control opacity
         hemi : str | None
@@ -978,13 +992,7 @@ class Brain(object):
                                                         orig_ids=True)
 
             # Maybe zero-out the non-border vertices
-            if borders:
-                n_vertices = labels.size
-                edges = utils.mesh_edges(self.geo[hemi].faces)
-                border_edges = labels[edges.row] != labels[edges.col]
-                show = np.zeros(n_vertices, dtype=np.int)
-                show[np.unique(edges.row[border_edges])] = 1
-                labels *= show
+            self._to_borders(labels, hemi, borders)
 
             # Handle null labels properly
             # (tksurfer doesn't use the alpha channel, so sometimes this
@@ -1028,8 +1036,10 @@ class Brain(object):
             threshold the label ids using this value in the label
             file's scalar field (i.e. label only vertices with
             scalar >= thresh)
-        borders : bool
-            show only label borders
+        borders : bool | int
+            Show only label borders. If int, specify the number of steps
+            (away from the true border) along the cortical mesh to include
+            as part of the border definition.
         hemi : str | None
             If None, it is assumed to belong to the hemipshere being
             shown. If two hemispheres are being shown, an error will
@@ -1045,7 +1055,7 @@ class Brain(object):
         -----
         To remove previously added labels, run Brain.remove_labels().
         """
-        if isinstance(label, basestring):
+        if isinstance(label, string_types):
             hemi = self._check_hemi(hemi)
             if color is None:
                 color = "crimson"
@@ -1067,9 +1077,10 @@ class Brain(object):
                                      % filepath)
             # Load the label data and create binary overlay
             if scalar_thresh is None:
-                ids = io.read_label(filepath)
+                ids = nib.freesurfer.read_label(filepath)
             else:
-                ids, scalars = io.read_label(filepath, read_scalars=True)
+                ids, scalars = nib.freesurfer.read_label(filepath,
+                                                         read_scalars=True)
                 ids = ids[scalars >= scalar_thresh]
         else:
             # try to extract parameters from label instance
@@ -1111,13 +1122,7 @@ class Brain(object):
                 i += 1
             label_name = name % i
 
-        if borders:
-            n_vertices = label.size
-            edges = utils.mesh_edges(self.geo[hemi].faces)
-            border_edges = label[edges.row] != label[edges.col]
-            show = np.zeros(n_vertices, dtype=np.int)
-            show[np.unique(edges.row[border_edges])] = 1
-            label *= show
+        self._to_borders(label, hemi, borders, restrict_idx=ids)
 
         # make a list of all the plotted labels
         ll = []
@@ -1128,6 +1133,27 @@ class Brain(object):
                           color, alpha))
         self.labels_dict[label_name] = ll
         self._toggle_render(True, views)
+
+    def _to_borders(self, label, hemi, borders, restrict_idx=None):
+        """Helper to potentially convert a label/parc to borders"""
+        if not isinstance(borders, (bool, int)) or borders < 0:
+            raise ValueError('borders must be a bool or positive integer')
+        if borders:
+            n_vertices = label.size
+            edges = utils.mesh_edges(self.geo[hemi].faces)
+            border_edges = label[edges.row] != label[edges.col]
+            show = np.zeros(n_vertices, dtype=np.int)
+            keep_idx = np.unique(edges.row[border_edges])
+            if isinstance(borders, int):
+                for _ in range(borders):
+                    keep_idx = np.in1d(self.geo[hemi].faces.ravel(), keep_idx)
+                    keep_idx.shape = self.geo[hemi].faces.shape
+                    keep_idx = self.geo[hemi].faces[np.any(keep_idx, axis=1)]
+                    keep_idx = np.unique(keep_idx)
+                if restrict_idx is not None:
+                    keep_idx = keep_idx[np.in1d(keep_idx, restrict_idx)]
+            show[keep_idx] = 1
+            label *= show
 
     def remove_labels(self, labels=None, hemi=None):
         """Remove one or more previously added labels from the image.
@@ -1536,13 +1562,19 @@ class Brain(object):
                 data["transparent"] = transparent
         self._toggle_render(True, views)
 
-    def set_data_time_index(self, time_idx):
+    def set_data_time_index(self, time_idx, interpolation='quadratic'):
         """Set the data time index to show
 
         Parameters
         ----------
-        time_idx : int
-            time index
+        time_idx : int | float
+            Time index. Non-integer values will be displayed using
+            interpolation between samples.
+        interpolation : str
+            Interpolation method (``scipy.interpolate.interp1d`` parameter,
+            one of 'linear' | 'nearest' | 'zero' | 'slinear' | 'quadratic' |
+            'cubic', default 'quadratic'). Interpolation is only used for
+            non-integer indexes.
         """
         if self.n_times is None:
             raise RuntimeError('cannot set time index with no time data')
@@ -1553,7 +1585,14 @@ class Brain(object):
         for hemi in ['lh', 'rh']:
             data = self.data_dict[hemi]
             if data is not None:
-                plot_data = data["array"][:, time_idx]
+                # interpolation
+                if isinstance(time_idx, float):
+                    times = np.arange(self.n_times)
+                    ifunc = interp1d(times, data['array'], interpolation, 1)
+                    plot_data = ifunc(time_idx)
+                else:
+                    plot_data = data["array"][:, time_idx]
+
                 if data["smooth_mat"] is not None:
                     plot_data = data["smooth_mat"] * plot_data
                 for surf in data["surfaces"]:
@@ -1562,9 +1601,34 @@ class Brain(object):
 
                 # Update time label
                 if data["time_label"]:
-                    time = data["time"][time_idx]
+                    if isinstance(time_idx, float):
+                        ifunc = interp1d(times, data['time'])
+                        time = ifunc(time_idx)
+                    else:
+                        time = data["time"][time_idx]
                     self.update_text(data["time_label"] % time, "time_label")
         self._toggle_render(True, views)
+
+    @property
+    def data_time_index(self):
+        """Retrieve the currently displayed data time index
+
+        Returns
+        -------
+        time_idx : int
+            Current time index.
+
+        Notes
+        -----
+        Raises a RuntimeError if the Brain instance has not data overlay.
+        """
+        time_idx = None
+        for hemi in ['lh', 'rh']:
+            data = self.data_dict[hemi]
+            if data is not None:
+                time_idx = data["time_idx"]
+                return time_idx
+        raise RuntimeError("Brain instance has no data overlay")
 
     @verbose
     def set_data_smoothing_steps(self, smoothing_steps, verbose=None):
@@ -1600,13 +1664,20 @@ class Brain(object):
                 data["smoothing_steps"] = smoothing_steps
         self._toggle_render(True, views)
 
-    def set_time(self, time):
-        """Set the data time index to the time point closest to time
+    def index_for_time(self, time, rounding='closest'):
+        """Find the data time index closest to a specific time point
 
         Parameters
         ----------
         time : scalar
             Time.
+        rounding : 'closest' | 'up' | 'down
+            How to round if the exact time point is not an index.
+
+        Returns
+        -------
+        index : int
+            Data time index closest to time.
         """
         if self.n_times is None:
             raise RuntimeError("Brain has no time axis")
@@ -1621,7 +1692,27 @@ class Brain(object):
                    "[%s, %s]" % (time, tmin, tmax))
             raise ValueError(err)
 
-        idx = np.argmin(np.abs(times - time))
+        if rounding == 'closest':
+            idx = np.argmin(np.abs(times - time))
+        elif rounding == 'up':
+            idx = np.nonzero(times >= time)[0][0]
+        elif rounding == 'down':
+            idx = np.nonzero(times <= time)[0][-1]
+        else:
+            err = "Invalid rounding parameter: %s" % repr(rounding)
+            raise ValueError(err)
+
+        return idx
+
+    def set_time(self, time):
+        """Set the data time index to the time point closest to time
+
+        Parameters
+        ----------
+        time : scalar
+            Time.
+        """
+        idx = self.index_for_time(time)
         self.set_data_time_index(idx)
 
     def _get_colorbars(self, row, col):
@@ -1640,8 +1731,9 @@ class Brain(object):
         if len(self.overlays_dict) > 0:
             for name, obj in self.overlays_dict.items():
                 for bar in ["pos_bar", "neg_bar"]:
-                    try:
-                        colorbars.append(getattr(obj[ind], bar))
+                    try:  # deal with positive overlays
+                        this_ind = min(len(obj) - 1, ind)
+                        colorbars.append(getattr(obj[this_ind], bar))
                     except AttributeError:
                         pass
         return colorbars
@@ -1683,7 +1775,7 @@ class Brain(object):
                     mlab.close(f)
                     self._figures[ri][ci] = None
 
-        #should we tear down other variables?
+        # should we tear down other variables?
         if self._v is not None:
             self._v.dispose()
             self._v = None
@@ -1692,7 +1784,6 @@ class Brain(object):
         if hasattr(self, '_v') and self._v is not None:
             self._v.dispose()
             self._v = None
-
 
     ###########################################################################
     # SAVING OUTPUT
@@ -1722,7 +1813,7 @@ class Brain(object):
         ftype = filename[filename.rfind('.') + 1:]
         good_ftypes = ['png', 'jpg', 'bmp', 'tiff', 'ps',
                        'eps', 'pdf', 'rib', 'oogl', 'iv', 'vrml', 'obj']
-        if not ftype in good_ftypes:
+        if ftype not in good_ftypes:
             raise ValueError("Supported image types are %s"
                              % " ".join(good_ftypes))
         mlab.draw(brain._f)
@@ -1822,7 +1913,7 @@ class Brain(object):
         brain = self.brain_matrix[row, col]
         return mlab.screenshot(brain._f, mode, antialiased)
 
-    def save_imageset(self, prefix, views,  filetype='png', colorbar='auto',
+    def save_imageset(self, prefix, views, filetype='png', colorbar='auto',
                       row=-1, col=-1):
         """Convenience wrapper for save_image
 
@@ -1837,10 +1928,10 @@ class Brain(object):
             desired views for images
         filetype: string
             image type
-        colorbar: None | 'auto' | [int], optional
-            if None no colorbar is visible. If 'auto' is given the colorbar
-            is only shown in the middle view. Otherwise on the listed
-            views when a list of int is passed.
+        colorbar: 'auto' | int | list of int | None
+            For 'auto', the colorbar is shown in the middle view (default).
+            For int or list of int, the colorbar is shown in the specified
+            views. For ``None``, no colorbar is shown.
         row : int
             row index of the brain to use
         col : int
@@ -1851,11 +1942,13 @@ class Brain(object):
         images_written: list
             all filenames written
         """
-        if isinstance(views, basestring):
+        if isinstance(views, string_types):
             raise ValueError("Views must be a non-string sequence"
                              "Use show_view & save_image for a single view")
         if colorbar == 'auto':
             colorbar = [len(views) // 2]
+        elif isinstance(colorbar, int):
+            colorbar = [colorbar]
         images_written = []
         for iview, view in enumerate(views):
             try:
@@ -1876,7 +1969,8 @@ class Brain(object):
         return images_written
 
     def save_image_sequence(self, time_idx, fname_pattern, use_abs_idx=True,
-                            row=-1, col=-1):
+                            row=-1, col=-1, montage='single', border_size=15,
+                            colorbar='auto', interpolation='quadratic'):
         """Save a temporal image sequence
 
         The files saved are named "fname_pattern % (pos)" where "pos" is a
@@ -1885,30 +1979,56 @@ class Brain(object):
         Parameters
         ----------
         time_idx : array-like
-            time indices to save
+            Time indices to save. Non-integer values will be displayed using
+            interpolation between samples.
         fname_pattern : str
-            filename pattern, e.g. 'movie-frame_%0.4d.png'
+            Filename pattern, e.g. 'movie-frame_%0.4d.png'.
         use_abs_idx : boolean
-            if True the indices given by "time_idx" are used in the filename
+            If True the indices given by "time_idx" are used in the filename
             if False the index in the filename starts at zero and is
-            incremented by one for each image (Default: True)
+            incremented by one for each image (Default: True).
         row : int
-            row index of the brain to use
+            Row index of the brain to use.
         col : int
-            column index of the brain to use
+            Column index of the brain to use.
+        montage: 'current' | 'single' | list
+            Views to include in the images: 'current' uses the currently
+            displayed image; 'single' (default) uses a single view, specified
+            by the ``row`` and ``col`` parameters; a 1 or 2 dimensional list
+            can be used to specify a complete montage. Examples:
+            ``['lat', 'med']`` lateral and ventral views ordered horizontally;
+            ``[['fro'], ['ven']]`` frontal and ventral views ordered
+            vertically.
+        border_size: int
+            Size of image border (more or less space between images).
+        colorbar: 'auto' | int | list of int | None
+            For 'auto', the colorbar is shown in the middle view (default).
+            For int or list of int, the colorbar is shown in the specified
+            views. For ``None``, no colorbar is shown.
+       interpolation : str
+            Interpolation method (``scipy.interpolate.interp1d`` parameter,
+            one of 'linear' | 'nearest' | 'zero' | 'slinear' | 'quadratic' |
+            'cubic', default 'quadratic'). Interpolation is only used for
+            non-integer indexes.
 
         Returns
         -------
         images_written: list
             all filenames written
         """
-        current_time_idx = self.data["time_idx"]
+        current_time_idx = self.data_time_index
         images_written = list()
         rel_pos = 0
         for idx in time_idx:
-            self.set_data_time_index(idx)
+            self.set_data_time_index(idx, interpolation)
             fname = fname_pattern % (idx if use_abs_idx else rel_pos)
-            self.save_single_image(fname, row, col)
+            if montage == 'single':
+                self.save_single_image(fname, row, col)
+            elif montage == 'current':
+                self.save_image(fname)
+            else:
+                self.save_montage(fname, montage, 'h', border_size, colorbar,
+                                  row, col)
             images_written.append(fname)
             rel_pos += 1
 
@@ -1935,10 +2055,10 @@ class Brain(object):
             applies if ``order`` is a flat list)
         border_size: int
             Size of image border (more or less space between images)
-        colorbar: None | 'auto' | [int], optional
-            if None no colorbar is visible. If 'auto' is given the colorbar
-            is only shown in the middle view. Otherwise on the listed
-            views when a list of int is passed.
+        colorbar: 'auto' | int | list of int | None
+            For 'auto', the colorbar is shown in the middle view (default).
+            For int or list of int, the colorbar is shown in the specified
+            views. For ``None``, no colorbar is shown.
         row : int
             row index of the brain to use
         col : int
@@ -1951,7 +2071,9 @@ class Brain(object):
         """
         # find flat list of views and nested list of view indexes
         assert orientation in ['h', 'v']
-        if all(isinstance(x, (str, dict)) for x in order):
+        if isinstance(order, (str, dict)):
+            views = [order]
+        elif all(isinstance(x, (str, dict)) for x in order):
             views = order
         else:
             views = []
@@ -1968,6 +2090,8 @@ class Brain(object):
 
         if colorbar == 'auto':
             colorbar = [len(views) // 2]
+        elif isinstance(colorbar, int):
+            colorbar = [colorbar]
         brain = self.brain_matrix[row, col]
 
         # store current view + colorbar visibility
@@ -1989,6 +2113,79 @@ class Brain(object):
             if cb is not None:
                 cb.visible = colorbars_visibility[cb]
         return out
+
+    def save_movie(self, fname, time_dilation=4., tmin=None, tmax=None,
+                   framerate=24, interpolation='quadratic', codec='mpeg4'):
+        """Save a movie (for data with a time axis)
+
+        .. Warning::
+            This method assumes that time is specified in seconds when adding
+            data. If time is specified in milliseconds this will result in
+            movies 1000 times longer than expected.
+
+        Parameters
+        ----------
+        fname : str
+            Path at which to save the movie.
+        time_dilation : float
+            Factor by which to stretch time (default 4). For example, an epoch
+            from -100 to 600 ms lasts 700 ms. With ``time_dilation=4`` this
+            would result in a 2.8 s long movie.
+        tmin : float
+            First time point to include (default: all data).
+        tmax : float
+            Last time point to include (default: all data).
+        framerate : float
+            Framerate of the movie (frames per second, default 24).
+        interpolation : str
+            Interpolation method (``scipy.interpolate.interp1d`` parameter,
+            one of 'linear' | 'nearest' | 'zero' | 'slinear' | 'quadratic' |
+            'cubic', default 'quadratic').
+        codec : str
+            Codec to use with ffmpeg (default 'mpeg4').
+
+        Notes
+        -----
+        This method requires FFmpeg to be installed in the system PATH. FFmpeg
+        is free and can be obtained from `here
+        <http://ffmpeg.org/download.html>`_.
+        """
+        assert_ffmpeg_is_available()
+
+        if tmin is None:
+            tmin = self._times[0]
+        elif tmin < self._times[0]:
+            raise ValueError("tmin=%r is smaller than the first time point "
+                             "(%r)" % (tmin, self._times[0]))
+
+        if tmax is None:
+            tmax = self._times[-1]
+        elif tmax >= self._times[-1]:
+            raise ValueError("tmax=%r is greater than the latest time point "
+                             "(%r)" % (tmax, self._times[-1]))
+
+        # find indexes at which to create frames
+        tstep = 1. / (framerate * time_dilation)
+        if (tmax - tmin) % tstep == 0:
+            tstop = tmax + tstep / 2.
+        else:
+            tstop = tmax
+        times = np.arange(tmin, tstop, tstep)
+        interp_func = interp1d(self._times, np.arange(self.n_times))
+        time_idx = interp_func(times)
+
+        n_times = len(time_idx)
+        if n_times == 0:
+            raise ValueError("No time points selected")
+
+        logger.debug("Save movie for time points/samples\n%s\n%s"
+                     % (times, time_idx))
+        tempdir = mkdtemp()
+        frame_pattern = 'frame%%0%id.png' % (np.floor(np.log10(n_times)) + 1)
+        fname_pattern = os.path.join(tempdir, frame_pattern)
+        self.save_image_sequence(time_idx, fname_pattern, False, -1, -1,
+                                 'current', interpolation=interpolation)
+        ffmpeg(fname, fname_pattern, framerate, codec)
 
     def animate(self, views, n_steps=180., fname=None, use_cache=False,
                 row=-1, col=-1):
@@ -2063,7 +2260,7 @@ class _Hemisphere(object):
     """Object for visualizing one hemisphere with mlab"""
     def __init__(self, subject_id, hemi, surf, figure, geo, curv, title,
                  config_opts, subjects_dir, bg_color, offset, backend):
-        if not hemi in ['lh', 'rh']:
+        if hemi not in ['lh', 'rh']:
             raise ValueError('hemi must be either "lh" or "rh"')
         # Set the identifying info
         self.subject_id = subject_id
@@ -2103,7 +2300,7 @@ class _Hemisphere(object):
 
     def show_view(self, view=None, roll=None, distance=None):
         """Orient camera to display view"""
-        if isinstance(view, basestring):
+        if isinstance(view, string_types):
             try:
                 vd = self._xfm_view(view, 'd')
                 view = dict(azimuth=vd['v'][0], elevation=vd['v'][1])
@@ -2118,7 +2315,7 @@ class _Hemisphere(object):
             view['figure'] = self._f
             view['distance'] = distance
             # DO NOT set focal point, can screw up non-centered brains
-            #view['focalpoint'] = (0.0, 0.0, 0.0)
+            # view['focalpoint'] = (0.0, 0.0, 0.0)
             mlab.view(**view)
         if roll is not None:
             mlab.roll(roll=roll, figure=self._f)
@@ -2145,7 +2342,7 @@ class _Hemisphere(object):
             's' to return string, 'd' to return dict
 
         """
-        if not view in self.viewdict:
+        if view not in self.viewdict:
             good_view = [k for k in self.viewdict if view == k[:len(view)]]
             if len(good_view) == 0:
                 raise ValueError('No views exist with this substring')
@@ -2515,7 +2712,7 @@ class TimeViewer(HasTraits):
     brain : Brain (or list of Brain)
         brain(s) to control
     """
-     # Nested import of traisui for setup.py without X server
+    # Nested import of traisui for setup.py without X server
     from traitsui.api import (View, Item, VSplit, HSplit, Group)
     min_time = Int(0)
     max_time = Int(1E9)

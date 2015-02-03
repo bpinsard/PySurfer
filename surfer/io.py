@@ -71,31 +71,6 @@ def read_scalar_data(filepath):
     return scalar_data
 
 
-def read_label(filepath, read_scalars=False):
-    """Load in a Freesurfer .label file.
-
-    Parameters
-    ----------
-    filepath : str
-        Path to label file
-    read_scalars : bool
-        If true, read and return scalars associated with each vertex
-
-    Returns
-    -------
-    label_array : numpy array (ints)
-        Array with indices of vertices included in label
-    scalar_array : numpy array (floats)
-        If read_scalars is True, array of scalar data for each vertex
-
-    """
-    label_array = np.loadtxt(filepath, dtype=np.int, skiprows=2, usecols=[0])
-    if read_scalars:
-        scalar_array = np.loadtxt(filepath, skiprows=2, usecols=[-1])
-        return label_array, scalar_array
-    return label_array
-
-
 def read_stc(filepath):
     """Read an STC file from the MNE package
 
@@ -179,7 +154,7 @@ def project_volume_data(filepath, hemi, reg_file=None, subject_id=None,
         Average over projection samples, take max, or take point sample
     projarg : single float or sequence of three floats
         Single float for point sample, sequence for avg/max specifying
-        start, stop, and stop
+        start, stop, and step
     surf : string
         Target surface
     smooth_fwhm : float
