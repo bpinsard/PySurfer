@@ -14,8 +14,6 @@ from scipy.spatial.distance import cdist
 import matplotlib as mpl
 from matplotlib import cm
 
-from .config import config
-
 logger = logging.getLogger('surfer')
 
 
@@ -228,7 +226,7 @@ def set_log_level(verbose=None, return_old_level=False):
         If True, return the old verbosity level.
     """
     if verbose is None:
-        verbose = config.get('options', 'logging_level')
+        verbose = "INFO"
     elif isinstance(verbose, bool):
         if verbose is True:
             verbose = 'INFO'
@@ -601,19 +599,14 @@ def _get_subjects_dir(subjects_dir=None, raise_error=True):
     subjects_dir : str
         The subjects directory. If the subjects_dir input parameter is not
         None, its value will be returned, otherwise it will be obtained from
-        the SUBJECTS_DIR environment variable. If that does not exist,
-        it will be obtained from the configuration file.
+        the SUBJECTS_DIR environment variable.
     """
     if subjects_dir is None:
-        if 'SUBJECTS_DIR' in os.environ:
-            subjects_dir = os.environ['SUBJECTS_DIR']
-        else:
-            subjects_dir = config.get('options', 'subjects_dir')
-            if raise_error and subjects_dir == '':
-                raise ValueError('The subjects directory has to be specified '
-                                 'using the subjects_dir parameter, the '
-                                 'SUBJECTS_DIR environment variable, or the '
-                                 '"subjects_dir" entry in the config file')
+        subjects_dir = os.environ.get("SUBJECTS_DIR", "")
+        if not subjects_dir and raise_error:
+            raise ValueError('The subjects directory has to be specified '
+                             'using the subjects_dir parameter or the '
+                             'SUBJECTS_DIR environment variable.')
 
     if raise_error and not os.path.exists(subjects_dir):
         raise ValueError('The subjects directory %s does not exist.'
@@ -662,7 +655,7 @@ def assert_ffmpeg_is_available():
 requires_ffmpeg = np.testing.dec.skipif(not has_ffmpeg(), 'Requires FFmpeg')
 
 
-def ffmpeg(dst, frame_path, framerate=24, codec='mpeg4'):
+def ffmpeg(dst, frame_path, framerate=24, codec='mpeg4', bitrate='1M'):
     """Run FFmpeg in a subprocess to convert an image sequence into a movie
 
     Parameters
@@ -674,8 +667,13 @@ def ffmpeg(dst, frame_path, framerate=24, codec='mpeg4'):
         Path to the source frames (with a frame number field like '%04d').
     framerate : float
         Framerate of the movie (frames per second, default 24).
-    codec : str
-        Codec to use (default 'mpeg4').
+    codec : str | None
+        Codec to use (default 'mpeg4'). If None, the codec argument is not
+        forwarded to ffmpeg, which preserves compatibility with very old
+        versions of ffmpeg
+    bitrate : str | float
+        Bitrate to use to encode movie. Can be specified as number (e.g.
+        64000) or string (e.g. '64k'). Default value is 1M
 
     Notes
     -----
@@ -701,7 +699,10 @@ def ffmpeg(dst, frame_path, framerate=24, codec='mpeg4'):
     frame_dir, frame_fmt = os.path.split(frame_path)
 
     # make the movie
-    cmd = ['ffmpeg', '-i', frame_fmt, '-r', str(framerate), '-c', codec, dst]
+    cmd = ['ffmpeg', '-i', frame_fmt, '-r', str(framerate), '-b', str(bitrate)]
+    if codec is not None:
+        cmd += ['-c', codec]
+    cmd += [dst]
     logger.info("Running FFmpeg with command: %s", ' '.join(cmd))
     sp = subprocess.Popen(cmd, cwd=frame_dir, stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE)

@@ -5,19 +5,18 @@ Create movie from  MEG inverse solution
 Data were computed using mne-python (http://martinos.org/mne)
 
 """
-print __doc__
-
 import os
 import numpy as np
 
 from surfer import Brain
 from surfer.io import read_stc
 
+print(__doc__)
+
 """
 create Brain object for visualization
 """
-brain = Brain('fsaverage', 'split', 'inflated',
-              config_opts=dict(width=800, height=400))
+brain = Brain('fsaverage', 'split', 'inflated', size=(800, 400))
 
 """
 read and display MNE dSPM inverse solution
@@ -28,8 +27,8 @@ for hemi in ['lh', 'rh']:
     data = stc['data']
     times = np.arange(data.shape[1]) * stc['tstep'] + stc['tmin']
     brain.add_data(data, colormap='hot', vertices=stc['vertices'],
-                   smoothing_steps=10, time=times, time_label='%0.3f s',
-                   hemi=hemi)
+                   smoothing_steps=10, time=times, hemi=hemi,
+                   time_label=lambda t: '%s ms' % int(round(t * 1e3)))
 
 """
 scale colormap

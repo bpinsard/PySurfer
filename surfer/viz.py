@@ -1,3 +1,4 @@
+from math import floor
 import os
 from os.path import join as pjoin
 from tempfile import mkdtemp
@@ -12,11 +13,13 @@ import nibabel as nib
 
 from mayavi import mlab
 from mayavi.tools.mlab_scene_model import MlabSceneModel
+from mayavi.core import lut_manager
 from mayavi.core.ui.api import SceneEditor
 from mayavi.core.ui.mayavi_scene import MayaviScene
+from traits.api import (HasTraits, Range, Int, Float,
+                        Bool, Enum, on_trait_change, Instance)
 
 from . import utils, io
-from .config import config
 from .utils import (Surface, verbose, create_color_lut, _get_subjects_dir,
                     string_types, assert_ffmpeg_is_available, ffmpeg)
 
@@ -24,8 +27,6 @@ from .utils import (Surface, verbose, create_color_lut, _get_subjects_dir,
 import logging
 logger = logging.getLogger('surfer')
 
-from traits.api import (HasTraits, Range, Int, Float,
-                        Bool, Enum, on_trait_change, Instance)
 
 lh_viewdict = {'lateral': {'v': (180., 90.), 'r': 90.},
                'medial': {'v': (0., 90.), 'r': -90.},
@@ -296,8 +297,17 @@ class Brain(object):
         (default: True)
     title : str
         title for the window
-    config_opts : dict
-        options to override visual options in config file
+    cortex : str or tuple
+        specifies how binarized curvature values are rendered.
+        either the name of a preset PySurfer cortex colorscheme (one of
+        'classic', 'bone', 'low_contrast', or 'high_contrast'), or the
+        name of mayavi colormap, or a tuple with values (colormap, min,
+        max, reverse) to fully specify the curvature colors.
+    size : float or pair of floats
+        the size of the window, in pixels. can be one number to specify
+        a square window, or the (width, height) of a rectangular window.
+    background, foreground : matplotlib colors
+        color of the background and foreground of the display window
     figure : list of instances of mayavi.core.scene.Scene | None
         If None, a new window will be created with the appropriate
         views.
@@ -318,10 +328,30 @@ class Brain(object):
     ----------
     brains : list
         List of the underlying brain instances.
+
     """
-    def __init__(self, subject_id, hemi, surf, rois_parc=None, curv=True,
-                 title=None, config_opts={}, figure=None, subjects_dir=None,
-                 views=['lat'], show_toolbar=False, offscreen=False):
+    def __init__(self, subject_id, hemi, surf, curv=True, title=None,
+                 cortex="classic", size=800, background="black",
+                 foreground="white", figure=None, subjects_dir=None,
+                 views=['lat'], show_toolbar=False, offscreen=False,
+                 config_opts=None):
+
+        # Keep backwards compatability
+        if config_opts is not None:
+            msg = ("The `config_opts` dict has been deprecated and will "
+                   "be removed in future versions. You should update your "
+                   "code and pass these options directly to the `Brain` "
+                   "constructor.")
+            warn(msg)
+            cortex = config_opts.get("cortex", cortex)
+            background = config_opts.get("background", background)
+            foreground = config_opts.get("foreground", foreground)
+
+            size = config_opts.get("size", size)
+            width = config_opts.get("width", size)
+            height = config_opts.get("height", size)
+            size = (width, height)
+
         col_dict = dict(lh=1, rh=1, both=1, split=2)
         n_col = col_dict[hemi]
         if hemi not in col_dict.keys():
@@ -363,7 +393,7 @@ class Brain(object):
              self.geo['rois'] = geo
 
         # deal with making figures
-        self._set_window_properties(config_opts)
+        self._set_window_properties(size, background, foreground)
         figures, _v = _make_viewer(figure, n_row, n_col, title,
                                    self._scene_size, offscreen)
         self._figures = figures
@@ -374,6 +404,7 @@ class Brain(object):
                 if f.scene is not None:
                     f.scene.background = self._bg_color
                     f.scene.foreground = self._fg_color
+
         # force rendering so scene.lights exists
         _force_render(self._figures, self._window_backend)
         self.toggle_toolbars(show_toolbar)
@@ -382,7 +413,7 @@ class Brain(object):
 
         # fill figures with brains
         kwargs = dict(surf=surf, curv=curv, title=None,
-                      config_opts=config_opts, subjects_dir=subjects_dir,
+                      cortex=cortex, subjects_dir=subjects_dir,
                       bg_color=self._bg_color, offset=offset)
         brains = []
         brain_matrix = []
@@ -458,39 +489,20 @@ class Brain(object):
             _force_render(self._figures, self._window_backend)
         return views
 
-    def _set_window_properties(self, config_opts):
-        """Set window properties using config_opts"""
+    def _set_window_properties(self, size, background, foreground):
+        """Set window properties that are used elsewhere."""
         # old option "size" sets both width and height
-        if "size" in config_opts:
-            width = config_opts["size"]
-            height = width
-
-        if "width" in config_opts:
-            width = config_opts["width"]
-        else:
-            width = config.getfloat("visual", "width")
-        if 'height' in config_opts:
-            height = config_opts['height']
-        else:
-            height = config.getfloat("visual", "height")
-        self._scene_size = (height, width)
-
         try:
-            bg_color_name = config_opts['background']
-        except KeyError:
-            bg_color_name = config.get("visual", "background")
-        if bg_color_name is not None:
-            bg_color_code = colorConverter.to_rgb(bg_color_name)
-        else:
-            bg_color_code = None
-        self._bg_color = bg_color_code
+            width, height = size
+        except TypeError:
+            width, height = size, size
+        self._scene_size = height, width
 
-        try:
-            fg_color_name = config_opts['foreground']
-        except KeyError:
-            fg_color_name = config.get("visual", "foreground")
-        fg_color_code = colorConverter.to_rgb(fg_color_name)
-        self._fg_color = fg_color_code
+        bg_color_rgb = colorConverter.to_rgb(background)
+        self._bg_color = bg_color_rgb
+
+        fg_color_rgb = colorConverter.to_rgb(foreground)
+        self._fg_color = fg_color_rgb
 
     def get_data_properties(self):
         """ Get properties of the data shown
@@ -690,13 +702,14 @@ class Brain(object):
             scalar_data = source
 
         if cast:
-            if (scalar_data.dtype.char == 'f'
-                    and scalar_data.dtype.itemsize < 8):
+            if (scalar_data.dtype.char == 'f' and
+                    scalar_data.dtype.itemsize < 8):
                 scalar_data = scalar_data.astype(np.float)
 
         return scalar_data, name
 
     def _get_display_range(self, scalar_data, min, max, sign):
+
         if scalar_data.min() >= 0:
             sign = "pos"
         elif scalar_data.max() <= 0:
@@ -710,45 +723,28 @@ class Brain(object):
         else:
             range_data = np.abs(scalar_data)
 
-        # Get the min and max from among various places
+        # Get a numeric value for the scalar minimum
         if min is None:
-            try:
-                min = config.getfloat("overlay", "min_thresh")
-            except ValueError:
-                min_str = config.get("overlay", "min_thresh")
-                if min_str == "robust_min":
-                    min = stats.scoreatpercentile(range_data, 2)
-                elif min_str == "actual_min":
-                    min = range_data.min()
-                else:
-                    min = 2.0
-                    warn("The 'min_thresh' value in your config value must be "
-                         "a float, 'robust_min', or 'actual_min', but it is "
-                         "%s. I'm setting the overlay min to the config "
-                         "default of 2" % min)
+            min = "robust_min"
+        if min == "robust_min":
+            min = stats.scoreatpercentile(range_data, 2)
+        elif min == "actual_min":
+            min = range_data.min()
 
+        # Get a numeric value for the scalar maximum
         if max is None:
-            try:
-                max = config.getfloat("overlay", "max_thresh")
-            except ValueError:
-                max_str = config.get("overlay", "max_thresh")
-                if max_str == "robust_max":
-                    max = stats.scoreatpercentile(scalar_data, 98)
-                elif max_str == "actual_max":
-                    max = range_data.max()
-                else:
-                    max = stats.scoreatpercentile(range_data, 98)
-                    warn("The 'max_thresh' value in your config value must be "
-                         "a float, 'robust_min', or 'actual_min', but it is "
-                         "%s. I'm setting the overlay min to the config "
-                         "default of robust_max" % max)
+            max = "robust_max"
+        if max == "robust_max":
+            max = stats.scoreatpercentile(scalar_data, 98)
+        elif max == "actual_max":
+            max = range_data.max()
 
         return min, max
 
     ###########################################################################
     # ADDING DATA PLOTS
-    def add_overlay(self, source, min=None, max=None, sign="abs", name=None,
-                    hemi=None):
+    def add_overlay(self, source, min=2, max="robust_max", sign="abs",
+                    name=None, hemi=None):
         """Add an overlay to the overlay dict from a file or array.
 
         Parameters
@@ -789,7 +785,7 @@ class Brain(object):
                  colormap="RdBu_r", alpha=1,
                  vertices=None, smoothing_steps=20, time=None,
                  time_label="time index=%d", colorbar=True,
-                 hemi=None, remove_existing=False):
+                 hemi=None, remove_existing=False, time_label_size=14):
         """Display data from a numpy array on the surface.
 
         This provides a similar interface to add_overlay, but it displays
@@ -830,8 +826,9 @@ class Brain(object):
             Default : 20
         time : numpy array
             time points in the data array (if data is 2D)
-        time_label : str | None
-            format of the time label (or None for no label)
+        time_label : str | callable | None
+            format of the time label (a format string, a function that maps
+            floating point time values to strings, or None for no label)
         colorbar : bool
             whether to add a colorbar to the figure
         hemi : str | None
@@ -841,6 +838,8 @@ class Brain(object):
         remove_existing : bool
             Remove surface added by previous "add_data" call. Useful for
             conserving memory when displaying different data in a loop.
+        time_label_size : int
+            Font size of the time label (default 14)
         """
         hemi = self._check_hemi(hemi)
 
@@ -891,6 +890,9 @@ class Brain(object):
             if not self.n_times == len(time):
                 raise ValueError('time is not the same length as '
                                  'array.shape[1]')
+            if isinstance(time_label, basestring):
+                time_label_fmt = time_label
+                time_label = lambda x: time_label_fmt % x
             data["time_label"] = time_label
             data["time"] = time
             data["time_idx"] = 0
@@ -913,9 +915,10 @@ class Brain(object):
                 bars.append(bar)
                 row, col = np.unravel_index(bi, self.brain_matrix.shape)
                 if array.ndim == 2 and time_label is not None:
-                    self.add_text(0.05, y_txt, time_label % time[0],
-                                  name="time_label", row=row, col=col)
-        
+                    self.add_text(0.95, y_txt, time_label(time[0]),
+                                  name="time_label", row=row, col=col,
+                                  font_size=time_label_size,
+                                  justification='right')
         self._toggle_render(True, views)
         data['surfaces'] = surfs
         data['colorbars'] = bars
@@ -1181,7 +1184,8 @@ class Brain(object):
                 ll.remove()
 
     def add_morphometry(self, measure, grayscale=False, hemi=None,
-                        remove_existing=True):
+                        remove_existing=True, colormap=None,
+                        min=None, max=None, colorbar=True):
         """Add a morphometry overlay to the image.
 
         Parameters
@@ -1196,6 +1200,14 @@ class Brain(object):
             for both hemispheres.
         remove_existing : bool
             If True (default), remove old annotations.
+        colormap : str
+            Mayavi colormap name, or None to use a sensible default.
+        min, max : floats
+            Endpoints for the colormap; if not provided the robust range
+            of the data is used.
+        colorbar : bool
+            If True, show a colorbar corresponding to the overlay data.
+
         """
         hemis = self._check_hemis(hemi)
         morph_files = []
@@ -1213,16 +1225,23 @@ class Brain(object):
             # Get rid of any old overlays
             for m in self.morphometry_list:
                 m['surface'].remove()
-                m['colorbar'].visible = False
+                if m["colorbar"] is not None:
+                    m['colorbar'].visible = False
             self.morphometry_list = []
         ml = self.morphometry_list
+
         for hemi, morph_file in zip(hemis, morph_files):
-            # Preset colormaps
-            cmap_dict = dict(area="pink",
-                             curv="RdBu",
-                             jacobian_white="pink",
-                             sulc="RdBu",
-                             thickness="pink")
+
+            if colormap is None:
+                # Preset colormaps
+                if grayscale:
+                    colormap = "gray"
+                else:
+                    colormap = dict(area="pink",
+                                    curv="RdBu",
+                                    jacobian_white="pink",
+                                    sulc="RdBu",
+                                    thickness="pink")[measure]
 
             # Read in the morphometric data
             morph_data = nib.freesurfer.read_morph_data(morph_file)
@@ -1232,24 +1251,27 @@ class Brain(object):
             ctx_idx = self.geo[hemi].labels["cortex"]
 
             # Get the display range
-            if measure == "thickness":
-                min, max = 1, 4
-            else:
-                min, max = stats.describe(morph_data[ctx_idx])[1]
+            min_default, max_default = np.percentile(morph_data[ctx_idx],
+                                                     [2, 98])
+            if min is None:
+                min = min_default
+            if max is None:
+                max = max_default
+
+            # Use appropriate values for bivariate measures
+            if measure in ["curv", "sulc"]:
+                lim = np.max([abs(min), abs(max)])
+                min, max = -lim, lim
 
             # Set up the Mayavi pipeline
             morph_data = _prepare_data(morph_data)
-
-            if grayscale:
-                colormap = "gray"
-            else:
-                colormap = cmap_dict[measure]
 
             for brain in self._brain_list:
                 if brain['hemi'] == hemi:
                     ml.append(brain['brain'].add_morphometry(morph_data,
                                                              colormap, measure,
-                                                             min, max))
+                                                             min, max,
+                                                             colorbar))
         self.morphometry_list = ml
         self._toggle_render(True, views)
 
@@ -1321,7 +1343,7 @@ class Brain(object):
 
     def add_contour_overlay(self, source, min=None, max=None,
                             n_contours=7, line_width=1.5, colormap="YlOrRd_r",
-                            hemi=None):
+                            hemi=None, remove_existing=True, colorbar=True):
         """Add a topographic contour overlay of the positive data.
 
         Note: This visualization will look best when using the "low_contrast"
@@ -1347,6 +1369,11 @@ class Brain(object):
             If None, it is assumed to belong to the hemipshere being
             shown. If two hemispheres are being shown, an error will
             be thrown.
+        remove_existing : bool
+            If there is an existing contour overlay, remove it before plotting.
+        colorbar : bool
+            If True, show the colorbar for the scalar value.
+
         """
         hemi = self._check_hemi(hemi)
 
@@ -1358,10 +1385,11 @@ class Brain(object):
         scalar_data = _prepare_data(scalar_data)
 
         # Maybe get rid of an old overlay
-        if hasattr(self, "contour"):
+        if hasattr(self, "contour") and remove_existing:
             for c in self.contour_list:
                 c['surface'].remove()
-                c['colorbar'].visible = False
+                if c['colorbar'] is not None:
+                    c['colorbar'].visible = False
 
         # Process colormap argument into a lut
         lut = create_color_lut(colormap)
@@ -1373,12 +1401,13 @@ class Brain(object):
                 cl.append(brain['brain'].add_contour_overlay(scalar_data,
                                                              min, max,
                                                              n_contours,
-                                                             line_width, lut))
+                                                             line_width, lut,
+                                                             colorbar))
         self.contour_list = cl
         self._toggle_render(True, views)
 
     def add_text(self, x, y, text, name, color=None, opacity=1.0,
-                 row=-1, col=-1):
+                 row=-1, col=-1, font_size=None, justification=None):
         """ Add a text to the visualization
 
         Parameters
@@ -1405,6 +1434,11 @@ class Brain(object):
         text = self.brain_matrix[row, col].add_text(x, y, text,
                                                     name, color, opacity)
         self.texts_dict[name] = dict(row=row, col=col, text=text)
+        if font_size is not None:
+            text.property.font_size = font_size
+            text.actor.text_scale_mode = 'viewport'
+        if justification is not None:
+            text.property.justification = justification
 
     def update_text(self, text, name, row=-1, col=-1):
         """Update text label
@@ -1532,8 +1566,8 @@ class Brain(object):
         n_colors2 = int(n_colors / 2)
 
         # Index of fmid in new colorbar
-        fmid_idx = int(np.round(n_colors * ((fmid - fmin)
-                                            / (fmax - fmin))) - 1)
+        fmid_idx = int(np.round(n_colors * ((fmid - fmin) /
+                                            (fmax - fmin))) - 1)
 
         # Go through channels
         for i in range(4):
@@ -1606,7 +1640,7 @@ class Brain(object):
                         time = ifunc(time_idx)
                     else:
                         time = data["time"][time_idx]
-                    self.update_text(data["time_label"] % time, "time_label")
+                    self.update_text(data["time_label"](time), "time_label")
         self._toggle_render(True, views)
 
     @property
@@ -2115,7 +2149,8 @@ class Brain(object):
         return out
 
     def save_movie(self, fname, time_dilation=4., tmin=None, tmax=None,
-                   framerate=24, interpolation='quadratic', codec='mpeg4'):
+                   framerate=24, interpolation='quadratic', codec='mpeg4',
+                   bitrate='1M'):
         """Save a movie (for data with a time axis)
 
         .. Warning::
@@ -2143,6 +2178,9 @@ class Brain(object):
             'cubic', default 'quadratic').
         codec : str
             Codec to use with ffmpeg (default 'mpeg4').
+        bitrate : str | float
+            Bitrate to use to encode movie. Can be specified as number (e.g.
+            64000) or string (e.g. '64k'). Default value is 1M
 
         Notes
         -----
@@ -2158,19 +2196,16 @@ class Brain(object):
             raise ValueError("tmin=%r is smaller than the first time point "
                              "(%r)" % (tmin, self._times[0]))
 
+        # find indexes at which to create frames
         if tmax is None:
             tmax = self._times[-1]
-        elif tmax >= self._times[-1]:
+        elif tmax > self._times[-1]:
             raise ValueError("tmax=%r is greater than the latest time point "
                              "(%r)" % (tmax, self._times[-1]))
-
-        # find indexes at which to create frames
-        tstep = 1. / (framerate * time_dilation)
-        if (tmax - tmin) % tstep == 0:
-            tstop = tmax + tstep / 2.
-        else:
-            tstop = tmax
-        times = np.arange(tmin, tstop, tstep)
+        n_frames = floor((tmax - tmin) * time_dilation * framerate)
+        times = np.arange(n_frames)
+        times /= framerate * time_dilation
+        times += tmin
         interp_func = interp1d(self._times, np.arange(self.n_times))
         time_idx = interp_func(times)
 
@@ -2185,7 +2220,7 @@ class Brain(object):
         fname_pattern = os.path.join(tempdir, frame_pattern)
         self.save_image_sequence(time_idx, fname_pattern, False, -1, -1,
                                  'current', interpolation=interpolation)
-        ffmpeg(fname, fname_pattern, framerate, codec)
+        ffmpeg(fname, fname_pattern, framerate, codec=codec, bitrate=bitrate)
 
     def animate(self, views, n_steps=180., fname=None, use_cache=False,
                 row=-1, col=-1):
@@ -2259,7 +2294,7 @@ class Brain(object):
 class _Hemisphere(object):
     """Object for visualizing one hemisphere with mlab"""
     def __init__(self, subject_id, hemi, surf, figure, geo, curv, title,
-                 config_opts, subjects_dir, bg_color, offset, backend):
+                 cortex, subjects_dir, bg_color, offset, backend):
         if hemi not in ['lh', 'rh']:
             raise ValueError('hemi must be either "lh" or "rh"')
         # Set the identifying info
@@ -2277,7 +2312,7 @@ class _Hemisphere(object):
         if curv:
             curv_data = self._geo.bin_curv
             meshargs = dict(scalars=curv_data)
-            colormap, vmin, vmax, reverse = self._get_geo_colors(config_opts)
+            colormap, vmin, vmax, reverse = self._get_geo_colors(cortex)
             kwargs = dict(colormap=colormap, vmin=vmin, vmax=vmax)
         else:
             curv_data = None
@@ -2487,7 +2522,8 @@ class _Hemisphere(object):
         surf.module_manager.scalar_lut_manager.lut.table = cmap
         return surf
 
-    def add_morphometry(self, morph_data, colormap, measure, min, max):
+    def add_morphometry(self, morph_data, colormap, measure,
+                        min, max, colorbar):
         """Add a morphometry overlay to the image"""
         mesh = mlab.pipeline.triangular_mesh_source(self._geo.x,
                                                     self._geo.y,
@@ -2503,9 +2539,12 @@ class _Hemisphere(object):
                                      name=measure, figure=self._f)
 
         # Get the colorbar
-        bar = mlab.scalarbar(surf)
-        self._format_cbar_text(bar)
-        bar.scalar_bar_representation.position2 = .8, 0.09
+        if colorbar:
+            bar = mlab.scalarbar(surf)
+            self._format_cbar_text(bar)
+            bar.scalar_bar_representation.position2 = .8, 0.09
+        else:
+            bar = None
 
         # Fil in the morphometry dict
         return dict(surface=surf, colorbar=bar, measure=measure)
@@ -2523,7 +2562,8 @@ class _Hemisphere(object):
         return points
 
     def add_contour_overlay(self, scalar_data, min=None, max=None,
-                            n_contours=7, line_width=1.5, lut=None):
+                            n_contours=7, line_width=1.5, lut=None,
+                            colorbar=True):
         """Add a topographic contour overlay of the positive data"""
         # Set up the pipeline
         mesh = mlab.pipeline.triangular_mesh_source(self._geo.x, self._geo.y,
@@ -2546,6 +2586,8 @@ class _Hemisphere(object):
         bar.data_range = min, max
         self._format_cbar_text(bar)
         bar.scalar_bar_representation.position2 = .8, 0.09
+        if not colorbar:
+            bar.visible = False
 
         # Set up a dict attribute with pointers at important things
         return dict(surface=surf, colorbar=bar)
@@ -2563,13 +2605,14 @@ class _Hemisphere(object):
                 for light in self._f.scene.light_manager.lights:
                     light.azimuth *= -1
 
-    def _get_geo_colors(self, config_opts):
+    def _get_geo_colors(self, cortex):
         """Return an mlab colormap name, vmin, and vmax for binary curvature.
 
         Parameters
         ----------
-        config_opts : dict
-            dictionary of config file "visual" options
+        cortex : {classic, high_contrast, low_contrast, bone, tuple}
+            The name of one of the preset cortex styles, or a tuple
+            with four entries as described in the return vales.
 
         Returns
         -------
@@ -2588,19 +2631,12 @@ class _Hemisphere(object):
                             low_contrast=("Greys", -5, 5, False),
                             bone=("bone", -.2, 2, True))
 
-        try:
-            cortex_color = config_opts['cortex']
-        except KeyError:
-            cortex_color = config.get("visual", "cortex")
-        try:
-            color_data = colormap_map[cortex_color]
-        except KeyError:
-            warn(""
-                 "The 'cortex' setting in your config file must be one of "
-                 "'classic', 'high_contrast', 'low_contrast', or 'bone', "
-                 "but your value is '%s'. I'm setting the cortex colormap "
-                 "to the 'classic' setting." % cortex_color)
-            color_data = colormap_map['classic']
+        if cortex in colormap_map:
+            color_data = colormap_map[cortex]
+        elif cortex in lut_manager.lut_mode_list():
+            color_data = cortex, -1, 2, False
+        else:
+            color_data = cortex
 
         return color_data
 
